@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page_title }}</title>
+    <!-- Tailwind CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <!-- Custom CSS -->
+    <link href="/static/css/styles.css" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body class="bg-gray-50">
+    <!-- Navbar -->
+    {% include "components/navbar.html" %}
+
+    <!-- Hero Section -->
+    <section class="bg-gradient-to-r from-blue-800 to-emerald-800 text-white py-20">
+        <div class="container mx-auto px-6">
+            <div class="flex flex-col md:flex-row items-center">
+                <div class="md:w-1/2 mb-10 md:mb-0">
+                    <h1 class="text-4xl md:text-5xl font-bold mb-6">AI-Powered Financial Compliance</h1>
+                    <p class="text-xl mb-8">Transform customer complaints into actionable insights with regulatory precision.</p>
+                    <div class="flex flex-col sm:flex-row gap-4">
+                        <a href="/dashboard" class="bg-white text-blue-800 px-6 py-3 rounded-lg font-bold text-center hover:bg-gray-100 transition">
+                            <i class="fas fa-chart-line mr-2"></i> Try Live Demo
+                        </a>
+                        <a href="/api/docs" class="border-2 border-white text-white px-6 py-3 rounded-lg font-bold text-center hover:bg-white hover:text-blue-800 transition">
+                            <i class="fas fa-code mr-2"></i> API Documentation
+                        </a>
+                    </div>
+                </div>
+                <div class="md:w-1/2">
+                    <div class="bg-white/20 backdrop-blur-md rounded-xl p-6">
+                        <div class="bg-white rounded-lg p-4 shadow-xl text-gray-800">
+                            <div class="flex items-center mb-4">
+                                <div class="h-3 w-3 bg-red-500 rounded-full mr-2"></div>
+                                <div class="h-3 w-3 bg-yellow-500 rounded-full mr-2"></div>
+                                <div class="h-3 w-3 bg-green-500 rounded-full mr-2"></div>
+                            </div>
+                            <div class="bg-gray-100 p-4 rounded-lg mb-4 font-mono text-sm">
+                                <p class="text-green-600">POST /api/analyze</p>
+                                <p>{</p>
+                                <p class="ml-4">"text": "Unauthorized credit card charges...",</p>
+                                <p class="ml-4">"product": "credit_cards"</p>
+                                <p>}</p>
+                            </div>
+                            <div class="bg-gray-800 text-green-400 p-4 rounded-lg font-mono text-sm">
+                                <p>{</p>
+                                <p class="ml-4">"risk_score": 0.92,</p>
+                                <p class="ml-4">"regulation": "Regulation E",</p>
+                                <p class="ml-4">"actions": ["Refund", "Card replacement"]</p>
+                                <p>}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section class="py-16">
+        <div class="container mx-auto px-6">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+                {% for key, value in stats.items() %}
+                <div class="bg-white rounded-xl shadow-md p-6 text-center transform transition hover:scale-105">
+                    <div class="text-3xl font-bold text-blue-800 mb-2">{{ value }}</div>
+                    <div class="text-gray-600 uppercase text-sm tracking-wider">{{ key.replace('_', ' ') }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="py-16 bg-gray-100">
+        <div class="container mx-auto px-6">
+            <h2 class="text-3xl font-bold text-center mb-16">Advanced Compliance Features</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+                {% for feature in features %}
+                <div class="bg-white rounded-xl shadow-lg p-6 hover:shadow-xl transition">
+                    <div class="text-4xl mb-4">{{ feature.icon }}</div>
+                    <h3 class="text-xl font-bold mb-3">{{ feature.title }}</h3>
+                    <p class="text-gray-600">{{ feature.desc }}</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    {% include "components/footer.html" %}
+
+    <!-- JavaScript -->
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

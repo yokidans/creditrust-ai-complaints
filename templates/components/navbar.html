@@ -1,0 +1,36 @@
+<nav class="bg-white shadow-lg">
+    <div class="container mx-auto px-6 py-3">
+        <div class="flex justify-between items-center">
+            <div class="flex items-center space-x-4">
+                <a href="/" class="text-2xl font-bold text-blue-800">CrediTrust AI</a>
+            </div>
+            <div class="hidden md:flex items-center space-x-8">
+                <a href="/" class="text-blue-800 font-medium">Home</a>
+                <a href="/dashboard" class="text-gray-600 hover:text-blue-800 transition">Dashboard</a>
+                <a href="/docs" class="text-gray-600 hover:text-blue-800 transition">API Docs</a>
+                <a href="#" class="text-gray-600 hover:text-blue-800 transition">Contact</a>
+            </div>
+            <div class="md:hidden">
+                <button id="menu-toggle" class="text-gray-600 focus:outline-none">
+                    <i class="fas fa-bars text-2xl"></i>
+                </button>
+            </div>
+        </div>
+        
+        <!-- Mobile menu -->
+        <div id="mobile-menu" class="hidden md:hidden mt-4 pb-4">
+            <a href="/" class="block py-2 text-blue-800">Home</a>
+            <a href="/dashboard" class="block py-2 text-gray-600">Dashboard</a>
+            <a href="/api/docs" class="block py-2 text-gray-600">API</a>
+            <a href="#" class="block py-2 text-gray-600">Contact</a>
+        </div>
+    </div>
+</nav>
+
+<script>
+    // Mobile menu toggle
+    document.getElementById('menu-toggle').addEventListener('click', function() {
+        const menu = document.getElementById('mobile-menu');
+        menu.classList.toggle('hidden');
+    });
+</script>
