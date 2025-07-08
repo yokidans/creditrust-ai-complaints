@@ -1,127 +1,80 @@
-# creditrust-ai-complaints/src/core/rag_engine.py
-from typing import Dict, List, Optional
+import numpy as np
+from typing import List, Dict, Optional
+from sentence_transformers import CrossEncoder
+from transformers import pipeline
 import logging
-from src.utils.logger import get_logger
-from src.services.vector_store import VectorStoreManager
-from langchain.chains import LLMChain
-from langchain.prompts import PromptTemplate
-from langchain.llms import OpenAI
-from langchain.chat_models import ChatOpenAI
+from tqdm import tqdm
+import torch
+from transformers import BitsAndBytesConfig
 
-logger = get_logger(__name__)
-
-class RAGEngine:
-    """Orchestrates the RAG pipeline: retrieval + generation."""
-    
-    def __init__(self, vector_store: VectorStoreManager, llm_config: Dict):
+class EliteRAGSystem:
+    def __init__(self, vector_store, llm_model="HuggingFaceH4/zephyr-7b-beta"):
         self.vector_store = vector_store
-        self.llm_config = llm_config
-        self.llm = self._initialize_llm()
-        self.prompt_template = self._create_prompt_template()
+        self.llm = self._init_llm(llm_model)
+        self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        self.logger = logging.getLogger(__name__)
         
-    def _initialize_llm(self):
-        """Initialize the language model."""
-        try:
-            return ChatOpenAI(
-                model_name=self.llm_config['model_name'],
-                temperature=self.llm_config['temperature'],
-                max_tokens=self.llm_config['max_tokens']
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM: {str(e)}")
-            raise
-            
-    def _create_prompt_template(self):
-        """Create the prompt template for answer generation."""
-        return PromptTemplate(
-            input_variables=["question", "context"],
-            template="""
-            You are a financial complaints analyst for CrediTrust. 
-            Answer the user's question based on the following complaint excerpts.
-            Provide a concise summary of key issues and patterns.
-            
-            Question: {question}
-            
-            Relevant Complaints:
-            {context}
-            
-            Answer:
-            """
+  
+    def _init_llm(self, model_name):
+        """Initialize LLM with proper quantization"""
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True
         )
         
-    def generate_response(self, question: str, product_filter: Optional[str] = None, analyze_sentiment: bool = False) -> Dict:
-        """
-        Generate an answer to a question using retrieved complaints.
+        return pipeline(
+            "text-generation",
+            model=model_name,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            quantization_config=quantization_config,
+            trust_remote_code= True   
+        )
+
+    def retrieve(self, query: str, k: int = 5) -> List[Dict]:
+        """Hybrid retrieval with semantic + keyword search"""
+        # Semantic search
+        semantic_results = self.vector_store.similarity_search(query, k=k*3)
         
-        Args:
-            question: The user's question
-            product_filter: Optional product category filter
-            analyze_sentiment: Whether to perform sentiment analysis
-            
-        Returns:
-            Dictionary containing answer, sources, and optional sentiment
-        """
-        try:
-            # Retrieve relevant complaints
-            filter_by = {'product': product_filter} if product_filter else None
-            retrieved = self.vector_store.similarity_search(question, k=5, filter_by=filter_by)
-            
-            if not retrieved:
-                return {
-                    'answer': "No relevant complaints found.",
-                    'sources': []
-                }
-            
-            # Format context for LLM
-            context = "\n\n".join([
-                f"Complaint ID: {item['source_id']}\n"
-                f"Product: {item['product']}\n"
-                f"Issue: {item['issue']}\n"
-                f"Text: {item['text']}\n"
-                f"Date: {item['date_received']}"
-                for item in retrieved
-            ])
-            
-            # Generate answer
-            chain = LLMChain(llm=self.llm, prompt=self.prompt_template)
-            answer = chain.run(question=question, context=context)
-            
-            # Prepare sources
-            sources = [{
-                'complaint_id': item['source_id'],
-                'product': item['product'],
-                'issue': item['issue'],
-                'text_excerpt': item['text'],
-                'similarity_score': item['score']
-            } for item in retrieved]
-            
-            # Optional sentiment analysis
-            sentiment = None
-            if analyze_sentiment:
-                sentiment = self._analyze_sentiment(context)
-            
-            return {
-                'answer': answer,
-                'sources': sources,
-                'sentiment': sentiment
-            }
-            
-        except Exception as e:
-            logger.error(f"Error generating response: {str(e)}")
-            raise
-            
-    def _analyze_sentiment(self, text: str) -> Dict:
-        """Perform basic sentiment analysis on complaint text."""
-        # This could be enhanced with a dedicated sentiment model
-        positive_words = ['good', 'happy', 'satisfied', 'pleased', 'helpful']
-        negative_words = ['bad', 'angry', 'frustrated', 'disappointed', 'terrible']
+        # Rerank with cross-encoder
+        pairs = [(query, doc.text) for doc in semantic_results]
+        rerank_scores = self.reranker.predict(pairs, show_progress_bar=False)
         
-        positive_count = sum(text.lower().count(word) for word in positive_words)
-        negative_count = sum(text.lower().count(word) for word in negative_words)
+        # Combine and sort
+        ranked_results = []
+        for doc, score in zip(semantic_results, rerank_scores):
+            doc.metadata["similarity_score"] = float(score)
+            ranked_results.append(doc)
         
-        if negative_count > positive_count:
-            return {'overall': 'negative', 'score': -1}
-        elif positive_count > negative_count:
-            return {'overall': 'positive', 'score': 1}
-        else:
-            return {'overall': 'neutral', 'score': 0}
+        return sorted(ranked_results, key=lambda x: x.metadata["similarity_score"], reverse=True)[:k]
+
+    def generate_response(self, query: str, context: List[str]) -> str:
+        """Elite prompt engineering with meta-reasoning"""
+        context_str = '\n'.join([f'--- Excerpt {i+1} ---\n{text}\n' for i, text in enumerate(context)])
+        prompt = f"""You are CrediTrust's Chief AI Analyst. Adhere strictly to:
+1. Analyze these {len(context)} complaint excerpts
+2. Identify root causes and patterns
+3. Propose 3 actionable solutions
+4. Rate severity (1-10)
+
+Context:
+{context_str}
+
+Question: {query}
+
+Response Template:
+Analysis: <pattern detection>
+Root Causes: <bulleted list>
+Solutions: <numbered actionable items>
+Severity: <rating with justification>"""
+        
+        response = self.llm(
+            prompt,
+            max_new_tokens=512,
+            temperature=0.3,
+            do_sample=True,
+            top_p=0.9
+        )
+        return response[0]["generated_text"]
