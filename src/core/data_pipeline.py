@@ -2,11 +2,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import re
-from typing import List, Dict, Optional, Generator
+from typing import List, Dict, Optional, Generator, Union, Tuple
 from pathlib import Path
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
+import json
+from sentence_transformers import SentenceTransformer
 
 # Configure logging
 logging.basicConfig(
@@ -20,304 +22,136 @@ class FinancialTextPreprocessor:
         self.stop_phrases = [
             "i am writing to complain about",
             "this is a complaint regarding",
-            "i would like to file a complaint",
-            "please be advised that",
-            "i am dissatisfied with"
+            "i would like to file a complaint"
         ]
         self.product_mapping = {
             "credit card": "credit_card",
-            "credit cards": "credit_card",
-            "personal loan": "personal_loan",
-            "personal loans": "personal_loan",
             "bnpl": "bnpl",
             "buy now pay later": "bnpl",
-            "savings account": "savings",
-            "savings accounts": "savings",
-            "money transfer": "money_transfer",
-            "money transfers": "money_transfer",
-            "mortgage": "mortgage",
-            "debt collection": "debt_collection"
+            "mortgage": "mortgage"
+        }
+        self.regulatory_keywords = {
+            'violation': 'Potential Compliance Violation',
+            'unauthorized': 'Unauthorized Activity',
+            'overcharge': 'Pricing Issue'
         }
 
     def clean_text(self, text: str) -> str:
-        """Clean and normalize complaint text"""
-        try:
-            if not isinstance(text, str) or not text.strip():
-                return ""
-                
-            text = text.lower().strip()
-            
-            # Remove stop phrases
-            for phrase in self.stop_phrases:
-                text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
-                
-            # Remove special characters but keep basic punctuation
-            text = re.sub(r"[^a-zA-Z0-9\s.,;?!-]", "", text)
-            
-            # Normalize whitespace
-            text = re.sub(r"\s+", " ", text).strip()
-            
-            return text
-        except Exception as e:
-            logger.error(f"Error cleaning text: {str(e)}")
+        """Enhanced text cleaning for RAG system"""
+        if not isinstance(text, str) or not text.strip():
             return ""
+            
+        text = text.lower().strip()
+        
+        # Remove boilerplate
+        for phrase in self.stop_phrases:
+            text = re.sub(re.escape(phrase), "", text)
+            
+        # Remove special chars but keep financial terms
+        text = re.sub(r"[^a-zA-Z0-9\s.,;?!$%-]", "", text)
+        
+        # Normalize monetary terms
+        text = re.sub(r"\$\s*(\d+)", r"$\1", text)
+        
+        return text.strip()
 
-    def map_product(self, product: str) -> Optional[str]:
-        """Map raw product names to standardized categories"""
-        try:
-            if not isinstance(product, str):
-                return None
-                
-            product = product.lower().strip()
-            for k, v in self.product_mapping.items():
-                if k in product:
-                    return v
-            return None
-        except Exception as e:
-            logger.error(f"Error mapping product: {str(e)}")
-            return None
+    def extract_monetary_terms(self, text: str) -> List[float]:
+        """Extract monetary values for risk assessment"""
+        amounts = []
+        for match in re.finditer(r"\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", text):
+            try:
+                amount = float(match.group(1).replace(",", ""))
+                amounts.append(amount)
+            except:
+                continue
+        return amounts
 
+    def identify_regulatory_flags(self, text: str) -> List[str]:
+        """Detect regulatory issues in text"""
+        flags = []
+        for term, flag in self.regulatory_keywords.items():
+            if term in text.lower():
+                flags.append(flag)
+        return flags
 
 class ComplaintDataPipeline:
     def __init__(self, data_dir: str = "data"):
         self.data_dir = Path(data_dir)
         self.preprocessor = FinancialTextPreprocessor()
+        self.embedder = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
         
-        # Create directories if they don't exist
-        (self.data_dir / "raw").mkdir(parents=True, exist_ok=True)
-        (self.data_dir / "processed").mkdir(parents=True, exist_ok=True)
-        (self.data_dir / "embeddings").mkdir(parents=True, exist_ok=True)
+        # Create required directories
+        (self.data_dir / "processed").mkdir(exist_ok=True)
+        (self.data_dir / "vector_ready").mkdir(exist_ok=True)
 
-    def _chunked_loader(self, file_path: str, chunksize: int = 10000) -> Generator[pd.DataFrame, None, None]:
-        """Load CSV in chunks to conserve memory"""
-        column_mapping = {
-            "Date received": "date_received",
-            "Product": "product",
-            "Sub-product": "sub_product",
-            "Issue": "issue",
-            "Sub-issue": "sub_issue",
-            "Consumer complaint narrative": "consumer_complaint_narrative",
-            "Company public response": "company_public_response",
-            "Company": "company",
-            "Complaint ID": "complaint_id"
-        }
+    def load_processed_data(self, file_path: Union[str, Path] = None) -> pd.DataFrame:
+        """Load data with enhanced validation for RAG system"""
+        default_path = self.data_dir / "processed/processed_complaints.parquet"
+        path = Path(file_path) if file_path else default_path
         
-        for chunk in pd.read_csv(
-            file_path,
-            parse_dates=["Date received"],
-            dtype={
-                "Complaint ID": str,
-                "Consumer complaint narrative": str,
-                "Product": str,
-                "Sub-product": str,
-                "Issue": str,
-                "Sub-issue": str,
-                "Company public response": str,
-                "Company": str
-            },
-            chunksize=chunksize,
-            low_memory=False,
-            na_values=["", "NA", "N/A", "NaN", "null"]
-        ):
-            chunk = chunk.rename(columns=column_mapping)
-            # Convert all string columns to str type explicitly
-            for col in column_mapping.values():
-                if col in chunk.columns and pd.api.types.is_string_dtype(chunk[col]):
-                    chunk[col] = chunk[col].astype(str).fillna("")
-            yield chunk
-
-    def load_raw_data(self, file_path: str, max_rows: int = 100000) -> pd.DataFrame:
-        """Load and validate raw complaint data in chunks with row limit"""
-        try:
-            chunks = []
-            required_cols = [
-                "date_received", "product", "sub_product", "issue",
-                "sub_issue", "consumer_complaint_narrative",
-                "company_public_response", "company", "complaint_id"
-            ]
-            
-            total_loaded = 0
-            for chunk in self._chunked_loader(file_path):
-                # Validate columns in each chunk
-                if not all(col in chunk.columns for col in required_cols):
-                    missing = [col for col in required_cols if col not in chunk.columns]
-                    raise ValueError(f"Missing required columns: {missing}")
-                
-                # Check if we need the full chunk or just part of it
-                remaining_rows = max_rows - total_loaded
-                if remaining_rows <= 0:
-                    break
-                    
-                if len(chunk) > remaining_rows:
-                    chunk = chunk.iloc[:remaining_rows]
-                
-                chunks.append(chunk)
-                total_loaded += len(chunk)
-                
-                if total_loaded >= max_rows:
-                    break
-            
-            if not chunks:
-                raise ValueError("No data was loaded - check your input file")
-            
-            return pd.concat(chunks, ignore_index=True)
+        df = pd.read_parquet(path)
         
-        except Exception as e:
-            logger.error(f"Error loading raw data: {str(e)}")
-            raise
+        # Validate required RAG fields
+        required = ['product', 'clean_text', 'complaint_id', 'date_received']
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing RAG required columns: {missing}")
+            
+        return df
 
-    def _safe_text_processing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Handle text processing with proper type checking"""
-        try:
-            df = df.copy()
-            
-            # Ensure we're working with strings and handle nulls
-            df["consumer_complaint_narrative"] = (
-                df["consumer_complaint_narrative"]
-                .astype(str)
-                .replace(["nan", "None", "null", ""], "")
-                .str.strip()
-            )
-            
-            # Filter empty narratives
-            df = df[df["consumer_complaint_narrative"] != ""]
-            
-            if len(df) == 0:
-                return df
-            
-            # Clean text in parallel
-            with ThreadPoolExecutor() as executor:
-                cleaned_texts = list(tqdm(
-                    executor.map(self.preprocessor.clean_text, df["consumer_complaint_narrative"]),
-                    total=len(df),
-                    desc="Cleaning texts"
-                ))
-            
-            df["clean_text"] = cleaned_texts
-            
-            # Filter out empty or very short texts
-            df = df[
-                df["clean_text"].apply(
-                    lambda x: isinstance(x, str) and len(x) > 20
-                )
-            ]
-            
-            return df
-        except Exception as e:
-            logger.error(f"Error in text processing: {str(e)}")
-            # Return the original DataFrame if processing fails
-            return df
-
-    def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Clean and transform complaint data in memory-efficient way"""
-        try:
-            # Process in batches if DataFrame is large
-            if len(df) > 50000:
-                return self._batch_preprocess(df)
-            
-            # Ensure product column is string type
-            df["product"] = df["product"].astype(str).fillna("")
-            
-            # Map products
-            df["product"] = df["product"].apply(self.preprocessor.map_product)
-            df = df[df["product"].notna()]
-            
-            if len(df) == 0:
-                return df
-            
-            # Process text
-            df = self._safe_text_processing(df)
-            
-            if len(df) == 0:
-                return df
-            
-            # Add metadata
-            df["year_month"] = df["date_received"].dt.to_period("M")
-            df["word_count"] = df["clean_text"].str.split().str.len()
-            df["complaint_id"] = df["complaint_id"].astype(str).str.strip()
-            
-            return df
+    def prepare_for_vector_store(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """Convert processed data to vector store format"""
+        vector_docs = []
         
-        except Exception as e:
-            logger.error(f"Error preprocessing data: {str(e)}")
-            # Return the original DataFrame if processing fails
-            return df
-
-    def _batch_preprocess(self, df: pd.DataFrame, batch_size: int = 10000) -> pd.DataFrame:
-        """Process large DataFrames in batches"""
-        processed_chunks = []
-        total_batches = (len(df) // batch_size) + 1
-        
-        for i in tqdm(range(total_batches), desc="Processing batches"):
-            batch = df.iloc[i*batch_size : (i+1)*batch_size].copy()
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Preparing vector docs"):
             try:
-                processed_chunk = self.preprocess_data(batch)
-                if not processed_chunk.empty:
-                    processed_chunks.append(processed_chunk)
+                text = row['clean_text']
+                if not text or len(text) < 50:  # Minimum length for meaningful embeddings
+                    continue
+                    
+                monetary_terms = self.preprocessor.extract_monetary_terms(text)
+                regulatory_flags = self.preprocessor.identify_regulatory_flags(text)
+                
+                vector_docs.append({
+                    'text': text,
+                    'product': row['product'],
+                    'date': row['date_received'].strftime('%Y-%m-%d'),
+                    'complaint_id': row['complaint_id'],
+                    'monetary_terms': monetary_terms,
+                    'regulatory_flags': regulatory_flags,
+                    'embedding': self.embedder.encode(text, convert_to_numpy=True).tolist()
+                })
             except Exception as e:
-                logger.error(f"Error processing batch {i}: {str(e)}")
-                logger.debug(f"Problematic batch data:\n{batch.head()}")
+                logger.error(f"Error processing row {row['complaint_id']}: {str(e)}")
                 continue
-        
-        if processed_chunks:
-            return pd.concat(processed_chunks, ignore_index=True)
-        return pd.DataFrame()
+                
+        return vector_docs
 
-    def run_pipeline(self, input_file: str, output_base_name: str = "processed_complaints", max_rows: int = 100000):
-        """Execute the complete data processing pipeline"""
-        raw_path = self.data_dir / "raw" / input_file
-        processed_dir = self.data_dir / "processed"
-        
-        if not raw_path.exists():
-            raise FileNotFoundError(f"Input file not found: {raw_path}")
-        
-        logger.info(f"Starting data pipeline (max_rows={max_rows})")
+    def save_vector_ready_data(self, documents: List[Dict[str, Any]], batch_size: int = 1000):
+        """Save in chunks for memory efficiency"""
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i + batch_size]
+            output_path = self.data_dir / f"vector_ready/batch_{i//batch_size}.json"
+            with open(output_path, 'w') as f:
+                json.dump(batch, f)
+            logger.info(f"Saved vector batch {i//batch_size} with {len(batch)} docs")
+
+    def run_rag_preparation(self, max_docs: int = 50000):
+        """Complete pipeline from processed data to RAG-ready format"""
         try:
-            # Load data in chunks with row limit
-            df = self.load_raw_data(raw_path, max_rows=max_rows)
-            logger.info(f"Loaded {len(df)} raw complaints")
+            df = self.load_processed_data()
+            if len(df) > max_docs:
+                df = df.sample(max_docs, random_state=42)
+                
+            vector_docs = self.prepare_for_vector_store(df)
+            self.save_vector_ready_data(vector_docs)
             
-            # Process data (in batches if needed)
-            processed_df = self.preprocess_data(df)
-            logger.info(f"Processed {len(processed_df)} complaints after cleaning")
-            
-            if processed_df.empty:
-                logger.warning("No complaints were processed - check your input data")
-                return processed_df
-            
-            # Generate output file paths
-            parquet_path = processed_dir / f"{output_base_name}.parquet"
-            csv_path = processed_dir / f"{output_base_name}.csv"
-            
-            # Save in parquet format
-            processed_df.to_parquet(parquet_path)
-            
-            # Save in CSV format (in chunks if large)
-            if len(processed_df) > 50000:
-                processed_df.to_csv(csv_path, index=False, chunksize=10000)
-            else:
-                processed_df.to_csv(csv_path, index=False)
-            
-            logger.info(f"Saved processed data to:\n- {parquet_path}\n- {csv_path}")
-            return processed_df
-        
+            logger.info(f"Successfully prepared {len(vector_docs)} documents for RAG system")
+            return vector_docs
         except Exception as e:
-            logger.error(f"Pipeline failed: {str(e)}")
+            logger.error(f"RAG preparation failed: {str(e)}")
             raise
-
 
 if __name__ == "__main__":
-    try:
-        pipeline = ComplaintDataPipeline()
-        result = pipeline.run_pipeline(
-            input_file="complaints.csv",
-            output_base_name="processed_complaints_100k",
-            max_rows=100000
-        )
-        print(f"\nPipeline completed successfully. Processed {len(result)} complaints.")
-        print(f"Output files created in 'data/processed' directory:")
-        print("- processed_complaints_100k.parquet")
-        print("- processed_complaints_100k.csv")
-    except Exception as e:
-        logger.exception("Pipeline execution failed")
-        print("\nPipeline failed - check logs for details")
+    pipeline = ComplaintDataPipeline()
+    pipeline.run_rag_preparation(max_docs=10000)

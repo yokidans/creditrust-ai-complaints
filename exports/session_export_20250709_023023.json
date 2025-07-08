@@ -1,0 +1,16 @@
+{
+  "session_data": [
+    {
+      "timestamp": "2025-07-09T02:30:22.844431",
+      "query": "{\n  \"queries_processed\": 0,\n  \"avg_response_time\": 0,\n  \"tokens_processed\": 0\n}",
+      "response": "Question: {\n\n \"queries_processed\": 0,\n\n\n\n\n\n\n \"avg_response_time\": 0,\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nQuestion: {\n \"queries_processed\": 0,",
+      "sources": [],
+      "context": []
+    }
+  ],
+  "performance_metrics": {
+    "query_count": 1,
+    "avg_response_time": 17.891676902770996,
+    "total_tokens_processed": 10
+  }
+}

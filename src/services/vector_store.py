@@ -1,178 +1,96 @@
 # src/services/vector_store.py
-# src/services/vector_store.py
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Tuple, Any  # Add all required typing imports
+from langchain.schema import Document
+import numpy as np
+import faiss
 import logging
 import os
 from pathlib import Path
-import numpy as np
-import pandas as pd
-import faiss
-from src.utils.logger import get_logger
-from src.utils.config_loader import load_config
 
-logger = get_logger(__name__)
+# Import embedding service (use either relative or absolute)
+try:
+    from .embedding_service import get_embedding_service
+except ImportError:
+    from src.services.embedding_service import get_embedding_service
+
+logger = logging.getLogger(__name__)
 
 class VectorStoreManager:
-    """Robust vector store with improved embedder handling"""
-    
-    def __init__(self, embedder: Any, dimension: Optional[int] = None):
-        """
-        Args:
-            embedder: Must implement encode() or be callable
-            dimension: Optional pre-specified embedding dimension
-        """
-        self.embedder = self._validate_embedder(embedder)
-        self.index = None
+    def __init__(self, embedding_service, index_path: str):
+        self.embedding_service = embedding_service
+        self.index_path = Path(index_path)
         self.metadata_store = []
-        self.dimension = dimension or self._infer_dimension()
-        
-        # Load config
-        config = load_config('model_config.yaml')
-        self.vector_store_path = Path(config['vector_store']['path'])
-        os.makedirs(self.vector_store_path.parent, exist_ok=True)
+        self.index = self._load_index()
+        self._validate_components()
     
-    def _validate_embedder(self, embedder) -> Any:
-        """Ensure embedder has required interface"""
-        if hasattr(embedder, 'encode') and callable(embedder.encode):
-            return embedder
-        if callable(embedder):
-            return embedder
-        raise ValueError(
-            "Embedder must implement encode() method or be callable. "
-            f"Got: {type(embedder)}"
+    def _validate_components(self):
+        """Validate required components are initialized"""
+        if not hasattr(self.embedding_service, 'embed_query'):
+            raise AttributeError("Embedding service must implement embed_query()")
+        if not hasattr(self.index, 'search'):
+            raise AttributeError("Vector index must implement search()")
+
+    def _load_index(self):
+        """Load or create FAISS index"""
+        if self.index_path.exists():
+            logger.info(f"Loading index from {self.index_path}")
+            index = faiss.read_index(str(self.index_path))
+            metadata_path = self.index_path.with_suffix('.metadata.parquet')
+            if metadata_path.exists():
+                self.metadata_store = pd.read_parquet(metadata_path).to_dict('records')
+            return index
+        logger.info("Creating new empty index")
+        return faiss.IndexFlatL2(self.embedding_service.dimension)
+
+    def add_documents(self, documents: List[Dict[str, Any]]):
+        """Add documents to the vector store"""
+        if not documents:
+            return
+            
+        texts = [doc.get('text', '') for doc in documents]
+        embeddings = np.array(
+            [self.embedding_service.embed_query(text) for text in texts],
+            dtype='float32'
         )
-    
-    def _infer_dimension(self) -> int:
-        """Safely determine embedding dimension"""
-        try:
-            test_embedding = (
-                self.embedder.encode(["test"]) 
-                if hasattr(self.embedder, 'encode')
-                else self.embedder(["test"])
-            )
-            return len(test_embedding[0])
-        except Exception as e:
-            raise ValueError(
-                f"Could not determine embedding dimension: {str(e)}"
-            ) from e
+        self.index.add(embeddings)
+        self.metadata_store.extend(documents)
+        self._save_index()
 
-    def create_index(self, chunks: List[Dict[str, Any]]) -> None:
-        """Create FAISS index from text chunks with metadata"""
-        if not chunks:
-            raise ValueError("Empty chunks list provided")
-            
-        try:
-            texts = [chunk['text'] for chunk in chunks]
-            logger.info(f"Generating embeddings for {len(chunks)} chunks...")
-            
-            embeddings = self._embedding_fn(texts)
-            embeddings = np.array(embeddings).astype('float32')
-            
-            # Validate embeddings
-            if embeddings.shape != (len(chunks), self.dimension):
-                raise ValueError(f"Embedding shape mismatch: {embeddings.shape}")
-            
-            # Create index
-            self.index = faiss.IndexFlatL2(self.dimension)
-            self.index.add(embeddings)
-            self.metadata_store = chunks
-            
-            logger.info(f"Created index with {len(chunks)} vectors (dim={self.dimension})")
-            
-        except Exception as e:
-            logger.error(f"Index creation failed: {str(e)}")
-            raise
-
-    def save_index(self) -> None:
-        """Save index and metadata to disk"""
-        if not self.index:
-            raise ValueError("No index to save")
-            
-        try:
-            faiss.write_index(self.index, str(self.vector_store_path))
-            
-            metadata_path = self.vector_store_path.with_suffix('.metadata.pkl')
-            pd.DataFrame(self.metadata_store).to_pickle(metadata_path)
-            
-            logger.info(f"Saved index to {self.vector_store_path}")
-        except Exception as e:
-            logger.error(f"Failed to save index: {str(e)}")
-            raise
-
-    def load_index(self) -> bool:
-        """Load index from disk"""
-        try:
-            if not self.vector_store_path.exists():
-                logger.warning("Index file not found")
-                return False
-                
-            self.index = faiss.read_index(str(self.vector_store_path))
-            
-            metadata_path = self.vector_store_path.with_suffix('.metadata.pkl')
-            self.metadata_store = pd.read_pickle(metadata_path).to_dict('records')
-            
-            logger.info(f"Loaded index with {self.index.ntotal} vectors")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to load index: {str(e)}")
-            return False
-
-    def similarity_search(self, query: str, k: int = 5, **filters) -> List[Dict[str, Any]]:
-        """
-        Search for similar complaints
+    def similarity_search_with_score(self, query: str, k: int = 5) -> List[Tuple[Document, float]]:
+        if self.index.ntotal == 0:
+            logger.warning("Attempted search on empty index")
+            return []
         
-        Args:
-            query: Search text
-            k: Number of results
-            filters: Metadata filters (e.g., product='credit_card')
-            
-        Returns:
-            List of matching complaints with scores
-        """
-        if not self.index:
-            raise ValueError("Index not initialized")
-            
         try:
-            query_embedding = self._embedding_fn([query])
-            query_embedding = np.array(query_embedding).astype('float32')
+            query_embedding = self.embedding_service.embed_query(query)
+            query_vector = np.array(query_embedding, dtype='float32').reshape(1, -1)
             
-            distances, indices = self.index.search(query_embedding, k)
+            # Increase search scope if initial results are poor
+            search_k = min(k * 3, self.index.ntotal)
+            distances, indices = self.index.search(query_vector, search_k)
             
             results = []
             for idx, score in zip(indices[0], distances[0]):
                 if idx >= 0:
-                    result = self.metadata_store[idx].copy()
-                    result['score'] = float(score)
-                    
-                    # Apply filters
-                    if filters and not all(
-                        result.get(k) == v for k, v in filters.items()
-                    ):
-                        continue
-                        
-                    results.append(result)
+                    doc = self._reconstruct_document(idx)
+                    if doc:  # Add quality checks here
+                        results.append((doc, 1/(1+score)))
             
-            return results
-            
+            return sorted(results, key=lambda x: x[1], reverse=True)[:k]
+        
         except Exception as e:
             logger.error(f"Search failed: {str(e)}")
-            raise
+            return []
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Get index statistics"""
-        return {
-            'vector_count': self.index.ntotal if self.index else 0,
-            'dimension': self.dimension,
-            'metadata_fields': list(self.metadata_store[0].keys()) if self.metadata_store else []
-        }
-    
-    def health_check(self) -> Dict[str, Any]:
-        """Return health status of the vector store"""
-        return {
-            'index_initialized': self.index is not None,
-            'vector_count': self.index.ntotal if self.index else 0,
-            'dimension': self.dimension,
-            'metadata_loaded': len(self.metadata_store) > 0,
-            'embedder_ready': hasattr(self.embedder, 'encode') or callable(self.embedder)
-        }
+    def _save_index(self):
+        """Save index to disk"""
+        faiss.write_index(self.index, str(self.index_path))
+        metadata_path = self.index_path.with_suffix('.metadata.parquet')
+        pd.DataFrame(self.metadata_store).to_parquet(metadata_path)
+
+def get_vector_store() -> VectorStoreManager:
+    """Factory function to get vector store instance"""
+    return VectorStoreManager(
+        embedding_service=get_embedding_service(),
+        index_path=os.getenv('VECTOR_INDEX_PATH', 'data/vector_store/faiss.index')
+    )
